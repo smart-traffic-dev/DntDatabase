@@ -214,12 +214,18 @@ describe('capability gates', () => {
     }
   });
 
-  it('a Mongo view has no Select top 1000', () => {
+  it('a Mongo collection and view have Select top 1000; a Redis key does not', () => {
     useConnections.getState().setStored([], [config(ids.prod, 'docs', { kind: 'mongo', port: 27017 })]);
     useConnections.getState().setInfo(ids.prod, { kind: 'mongo', variant: 'Mongo', version: [7, 0, 0], version_string: '7.0.0', capabilities: defaultCaps('mongo') });
-    const view: TreeNode = { ...tableNode, label: 'active', objectRef: { database: 'shop', schema: null, name: 'active', kind: 'View' } };
-    expect(labelsOf(view)).not.toContain('Select top 1000');
-    expect(labelsOf(view)).toContain('Open');
+    for (const kind of ['Collection', 'View'] as const) {
+      const node: TreeNode = { ...tableNode, label: 'x', objectRef: { database: 'shop', schema: null, name: 'x', kind } };
+      expect(labelsOf(node)).toContain('Select top 1000');
+      expect(labelsOf(node)).toContain('Open');
+    }
+    useConnections.getState().setStored([], [config(ids.prod, 'cache', { kind: 'redis', port: 6379 })]);
+    useConnections.getState().setInfo(ids.prod, { kind: 'redis', variant: 'Redis', version: [7, 2, 0], version_string: '7.2.0', capabilities: defaultCaps('redis') });
+    const key: TreeNode = { ...tableNode, label: 'k', objectRef: { database: '0', schema: null, name: 'k', kind: 'Key' } };
+    expect(labelsOf(key)).not.toContain('Select top 1000');
   });
 
   it('mysql_tree_menu_unchanged', () => {

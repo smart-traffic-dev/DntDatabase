@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { config, ids } from '../../ui/src/test/fixtures/data';
-import { byId, pickOption } from '../src/app';
+import { byId, expandRow, pickOption, treeRow } from '../src/app';
 import { createBackend } from '../src/backend';
 import { installBackend } from '../src/shim';
 import { expect, test } from '../src/test';
@@ -126,6 +126,28 @@ test.describe('query tab of a Redis connection (browser, fake IPC backend)', () 
     await runLine(page, 'GET a');
     await expect(byId(page, 'result-grid')).toBeVisible();
     await expect(page.getByRole('button', { name: 'JSON', exact: true })).toHaveCount(0);
+  });
+
+  test('Select top 1000 on a MongoDB collection opens a find().limit() query that returns the documents', async ({ page }) => {
+    const backend = await setup(page);
+    await expandRow(page, 'docs');
+    await expandRow(page, 'shop');
+    await expandRow(page, 'Collections');
+    await treeRow(page, 'orders').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Select top 1000' }).click();
+
+    await expect(editor(page)).toContainText('db.orders.find({}).limit(1000)');
+    await editor(page).click();
+    await page.keyboard.press('Control+Enter');
+    await expect(byId(page, 'result-grid')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'JSON', exact: true })).toBeVisible();
+    await expect(page.getByText('3 rows')).toBeVisible();
+    // The tab is bound to the collection's database.
+    expect(backend.calls.filter((c) => c.cmd === 'query_plan').at(-1)?.args).toMatchObject({
+      connId: ids.legacy,
+      database: 'shop',
+      text: 'db.orders.find({}).limit(1000)',
+    });
   });
 
   test('FLUSHDB on Production asks for the connection name before it runs', async ({ page }) => {

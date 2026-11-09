@@ -4,7 +4,7 @@ import { useDialogs } from '../store/dialogs';
 import { useTree, type TreeNode } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
-import { openNewQuery, openSelectTop } from './newQuery';
+import { isQueryable, openNewQuery, openSelectTop } from './newQuery';
 import { DDL_EDITABLE_KINDS, openDdlEditTab } from './openDdlEdit';
 import { openDesignTab, openObjectTab } from './openObject';
 import { backupActionItems } from '../transfer/backup/backupMenu';
@@ -225,10 +225,7 @@ export function treeMenuItems(node: TreeNode): Item[] {
   const destructive = objectActions.filter((i) => 'danger' in i && i.danger);
   if (node.kind === 'object') {
     const kind = node.objectRef?.kind;
-    const connKind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
-    // A SELECT needs a SQL engine: a Mongo view would open a blank console.
-    const sql = connKind === undefined || sqlEngine(connKind) !== null;
-    const queryable = sql && (kind === 'Table' || kind === 'View' || kind === 'MaterializedView');
+    const queryable = isQueryable(connectionId, kind);
     return grouped(
       [
         { label: 'Open', hint: 'Enter', run: () => openObjectTab(node) },

@@ -1,5 +1,5 @@
-import type { ObjectKind, ObjectRef } from '../bindings';
-import { isKind, quoteIdent, sqlEngine, type SqlEngine } from '../engine';
+import type { DbKind, ObjectKind, ObjectRef } from '../bindings';
+import { canSample, quoteIdent, sampleQuery, selectTopSql, type SelectOptions } from '../engine';
 import { useConnections } from '../store/connections';
 import { useDdlEdits } from '../store/ddlEdits';
 import { useQueryDocs } from '../store/queryTabs';
@@ -30,57 +30,41 @@ export function openNewQuery(node?: TreeNode): string {
 
 export { quoteIdent };
 
-export interface SelectOptions {
-  /** Default 1000. */
-  limit?: number;
-  /** Rows to skip (`OFFSET`); omitted when 0. */
-  offset?: number;
-  orderBy?: { column: string; dir: 'asc' | 'desc' } | null;
-}
+export { selectTopSql, type SelectOptions };
 
-/**
- * `SELECT * ... LIMIT 1000` of a table or view, identifiers quoted for the connection's engine.
- * The one helper for this SQL: the tree's "Select top 1000", the object tab's Query button and
- * the data view's "Open in query" (which passes its page size, offset and sort).
- */
-export function selectTopSql(target: { objectRef?: ObjectRef }, kind: SqlEngine, opts: SelectOptions = {}): string {
-  const ref = target.objectRef;
-  if (!ref) return '';
-  // PostgreSQL addresses a table by schema (a connection is one database); MySQL by database.
-  const qualifier = isKind(kind, 'postgres') ? ref.schema : ref.database;
-  const table = qualifier ? `${quoteIdent(kind, qualifier)}.${quoteIdent(kind, ref.name)}` : quoteIdent(kind, ref.name);
-  const order = opts.orderBy ? ` ORDER BY ${quoteIdent(kind, opts.orderBy.column)} ${opts.orderBy.dir === 'desc' ? 'DESC' : 'ASC'}` : '';
-  const offset = opts.offset ? ` OFFSET ${Math.trunc(opts.offset)}` : '';
-  return `SELECT * FROM ${table}${order} LIMIT ${Math.trunc(opts.limit ?? 1000)}${offset};`;
-}
+/** The kind of a connection, or `undefined` when unknown. */
+const kindOf = (connectionId: string | null | undefined): DbKind | undefined =>
+  connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
 
-/** Whether `SELECT * FROM` makes sense on an object of this kind. */
-export const isQueryable = (kind: ObjectKind | undefined) => kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
-
-/** The SQL engine of a connection, or `null` for none or for a Command-family kind. */
-const engineOf = (connectionId: string | null | undefined): SqlEngine | null => {
-  const kind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
-  return kind ? sqlEngine(kind) : null;
+/** Whether a sample query (`SELECT * FROM`, `db.x.find()`) makes sense on an object of this kind in this connection. */
+export const isQueryable = (connectionId: string | null | undefined, kind: ObjectKind | undefined): boolean => {
+  const engine = kindOf(connectionId);
+  return engine !== undefined && canSample(engine, kind);
 };
 
-/** Opens a new query tab on a table / view node, with its first 1000 rows selected. */
+/** Sets the sample query of `ref` on tab `id` when the connection's engine has one. */
+function fillSample(id: string, connectionId: string | null | undefined, ref: ObjectRef | undefined) {
+  const kind = kindOf(connectionId);
+  const text = kind && ref ? sampleQuery(kind, ref) : null;
+  if (text) useQueryDocs.getState().update(id, { sql: text });
+}
+
+/** Opens a new query tab on a table / view / collection node, with its first 1000 rows selected. */
 export function openSelectTop(node: TreeNode): string {
   const id = openNewQuery(node);
-  const engine = engineOf(connectionIdOf(node.id));
-  if (engine) useQueryDocs.getState().update(id, { sql: selectTopSql(node, engine) });
+  fillSample(id, connectionIdOf(node.id), node.objectRef);
   return id;
 }
 
 /** Ctrl+Q from the tree: on a table / view its first 1000 rows are selected, anything else just opens a query. */
 export function openQueryOnNode(node: TreeNode): string {
-  return node.kind === 'object' && isQueryable(node.objectRef?.kind) ? openSelectTop(node) : openNewQuery(node);
+  return node.kind === 'object' && isQueryable(connectionIdOf(node.id), node.objectRef?.kind) ? openSelectTop(node) : openNewQuery(node);
 }
 
 /** Opens a query bound to `connectionId` / `database`, with the first 1000 rows of `ref` selected when it is a table or view. */
 function openQueryOn(connectionId: string, database: string | null, ref?: ObjectRef): string {
   const id = useQueryDocs.getState().newQuery(connectionId, database);
-  const engine = engineOf(connectionId);
-  if (engine && ref && isQueryable(ref.kind)) useQueryDocs.getState().update(id, { sql: selectTopSql({ objectRef: ref }, engine) });
+  fillSample(id, connectionId, ref);
   return id;
 }
 

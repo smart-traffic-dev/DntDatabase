@@ -225,3 +225,5 @@ export function isKind(engine: SqlEngine, k: SqlEngine): boolean {
 export function namespaceModel(kind: DbKind): NamespaceModel {
   return defaultCaps(kind).namespaces;
 }
+
+export { canSample, sampleQuery, selectTopSql, type SelectOptions } from './sampleQuery';

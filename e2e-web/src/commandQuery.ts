@@ -19,7 +19,7 @@ import { WithChannel, type Handler } from './shim';
 // cuts a script as the backend's command languages do (Redis one command per line, MongoDB by `;`
 // or a blank line), `query_plan` judges each command with the R4a policy (`crates/query/src/
 // policy.rs`) and `query_run` streams the R4a `RunEvent`s. Only the commands the specs use are
-// understood: GET, SET, HGETALL, FLUSHDB, `db.<c>.find({})` and `db.<c>.deleteMany({})`.
+// understood: GET, SET, HGETALL, FLUSHDB, `db.<c>.find({})` (with `.limit(n)`, or `db.getCollection("c")`) and `db.<c>.deleteMany({})`.
 
 type Range = [number, number];
 
@@ -169,18 +169,20 @@ function flatten(docs: Record<string, unknown>[]): Outcome {
 }
 
 function mongoCommand(state: CommandFakeState, database: string | null, source: string): Command {
-  const m = /^db\.([A-Za-z_][\w]*)\.(find|deleteMany)\(\s*(\{\s*\})?\s*\)$/.exec(source.trim());
-  const docs = () => state.mongo.get(database ?? '')?.get(m?.[1] ?? '') ?? [];
-  if (m?.[2] === 'find') {
+  const m = /^db\.(?:([A-Za-z_][\w]*)|getCollection\(\s*("(?:[^"\\]|\\.)*")\s*\))\.(find|deleteMany)\(\s*(\{\s*\})?\s*\)(?:\.limit\(\s*(\d+)\s*\))?$/.exec(source.trim());
+  const name = m ? (m[1] ?? (JSON.parse(m[2]!) as string)) : null;
+  const docs = () => state.mongo.get(database ?? '')?.get(name ?? '') ?? [];
+  if (m?.[3] === 'find') {
+    const limit = m[5] === undefined || m[5] === '0' ? Infinity : Number(m[5]);
     return {
-      facts: { class: 'read', unbounded: false, target: m[1]!, dropsDatabase: null },
-      run: () => flatten(docs()),
+      facts: { class: 'read', unbounded: false, target: name, dropsDatabase: null },
+      run: () => flatten(docs().slice(0, limit)),
     };
   }
-  if (m?.[2] === 'deleteMany') {
+  if (m?.[3] === 'deleteMany' && m[5] === undefined) {
     return {
       // An empty filter: every document of the collection.
-      facts: { class: 'write', unbounded: m[3] !== undefined, target: m[1]!, dropsDatabase: null },
+      facts: { class: 'write', unbounded: m[4] !== undefined, target: name, dropsDatabase: null },
       run: () => {
         const list = docs();
         const n = list.length;
@@ -190,7 +192,7 @@ function mongoCommand(state: CommandFakeState, database: string | null, source: 
     };
   }
   return {
-    facts: { class: 'unknown', unbounded: false, target: m?.[1] ?? null, dropsDatabase: null },
+    facts: { class: 'unknown', unbounded: false, target: name, dropsDatabase: null },
     run: () => ({ kind: 'error', message: 'MongoServerError: command not understood by the e2e fake' }),
   };
 }

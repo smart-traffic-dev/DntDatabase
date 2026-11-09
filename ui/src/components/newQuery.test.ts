@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import type { ObjectRef } from '../bindings';
+import { useConnections } from '../store/connections';
+import { useQueryDocs } from '../store/queryTabs';
+import { objectTabId, useTabs } from '../store/tabs';
 import type { TreeNode } from '../store/tree';
-import { selectTopSql } from './newQuery';
+import { config, ids, mockBackend, resetStores } from '../test/backend';
+import { openQueryFromActiveTab, openQueryOnNode, openSelectTop, selectTopSql } from './newQuery';
 
 const table = (name: string, database: string, schema: string | null): TreeNode => ({
   id: 'conn:c/obj',
@@ -39,5 +44,46 @@ describe('selectTopSql', () => {
     expect(selectTopSql(table('t', 'shop', null), 'mysql', { limit: 10, offset: 0, orderBy: { column: 'a`b', dir: 'asc' } })).toBe(
       'SELECT * FROM `shop`.`t` ORDER BY `a``b` ASC LIMIT 10;',
     );
+  });
+});
+
+describe('sample query entry points', () => {
+  const ref = (name: string, kind: ObjectRef['kind']): ObjectRef => ({ database: 'shop', schema: null, name, kind });
+  const nodeOf = (conn: string, objectRef: ObjectRef): TreeNode => ({ id: `conn:${conn}/obj:${objectRef.name}`, kind: 'object', label: objectRef.name, objectRef });
+  const docOf = (id: string) => useQueryDocs.getState().docs.get(id)!;
+
+  beforeEach(() => {
+    resetStores();
+    mockBackend({ tabs_save: () => null, tabs_delete: () => null, query_close_tab: () => null });
+    useConnections.getState().setStored([], [
+      config(ids.prod, 'sql'),
+      config(ids.legacy, 'docs', { kind: 'mongo', port: 27017 }),
+      config(ids.analytics, 'cache', { kind: 'redis', port: 6379 }),
+    ]);
+  });
+
+  it('opens a find() on a Mongo collection and view, bound to its database', () => {
+    const id = openSelectTop(nodeOf(ids.legacy, ref('orders', 'Collection')));
+    expect(docOf(id)).toMatchObject({ sql: 'db.orders.find({}).limit(1000)', connectionId: ids.legacy, database: 'shop' });
+    const view = openQueryOnNode(nodeOf(ids.legacy, ref('system.views', 'View')));
+    expect(docOf(view).sql).toBe('db.getCollection("system.views").find({}).limit(1000)');
+  });
+
+  it('Ctrl+Q on an open Mongo collection tab', () => {
+    const objectRef = ref('orders', 'Collection');
+    useTabs.getState().open({ id: objectTabId(ids.legacy, objectRef), kind: 'object', connectionId: ids.legacy, objectRef, title: 'orders' });
+    const id = openQueryFromActiveTab();
+    expect(docOf(id)).toMatchObject({ sql: 'db.orders.find({}).limit(1000)', connectionId: ids.legacy, database: 'shop' });
+  });
+
+  it('keeps the SQL output for MySQL', () => {
+    const id = openSelectTop(nodeOf(ids.prod, ref('orders', 'Table')));
+    expect(docOf(id).sql).toBe('SELECT * FROM `shop`.`orders` LIMIT 1000;');
+  });
+
+  it('opens blank for Redis keys and for a Mongo database node', () => {
+    expect(docOf(openQueryOnNode(nodeOf(ids.analytics, ref('k', 'Key')))).sql).toBe('');
+    const dbNode: TreeNode = { id: `conn:${ids.legacy}/db`, kind: 'database', label: 'shop', scope: { database: 'shop', schema: null } };
+    expect(docOf(openQueryOnNode(dbNode)).sql).toBe('');
   });
 });
