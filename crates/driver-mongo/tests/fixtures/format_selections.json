@@ -1,0 +1,137 @@
+[
+  {
+    "document": "db.a.find()\ndb.b.find({\n  x: 1\n})\n  .limit(1); db.c.find( )\n",
+    "selection": [
+      26,
+      30
+    ],
+    "result": "db.a.find()\ndb.b.find({ x: 1 }).limit(1); db.c.find( )\n",
+    "refused": null
+  },
+  {
+    "document": "db.a.find( )\ndb.b.find({\n  x: 1\n})\n  .limit(1); db.c.find( )\n",
+    "selection": [
+      3,
+      17
+    ],
+    "result": "db.a.find()\ndb.b.find({ x: 1 }).limit(1); db.c.find( )\n",
+    "refused": null
+  },
+  {
+    "document": "db.a.find()\n// old: db.c.find(); db.c.drop()\ndb.b.find()",
+    "selection": [
+      20,
+      44
+    ],
+    "result": null,
+    "refused": "Nothing to format"
+  },
+  {
+    "document": "db.a.find() // keep; db.c.drop()\ndb.b.find({x :1})",
+    "selection": [
+      15,
+      50
+    ],
+    "result": "db.a.find() // keep; db.c.drop()\ndb.b.find({ x: 1 })",
+    "refused": null
+  },
+  {
+    "document": "db.a.find( )\n/* example: {a :1} */\ndb.b.find( )",
+    "selection": [
+      28,
+      39
+    ],
+    "result": "db.a.find( )\n/* example: {a :1} */\ndb.b.find()",
+    "refused": null
+  },
+  {
+    "document": "db.a.find( /* example: {a :1} */ )",
+    "selection": [
+      14,
+      21
+    ],
+    "result": "db.a.find(/* example: {a :1} */)",
+    "refused": null
+  },
+  {
+    "document": "db.orders.aggregate([{$match: {status: \"paid\", total: {$gt: 100}}}, {$out: \"paid_orders_archive\"}]).explain(); db.b.find() / 2",
+    "selection": [
+      0,
+      110
+    ],
+    "result": null,
+    "refused": "JavaScript may read this differently"
+  },
+  {
+    "document": "db.orders.find({status: \"paid\", customer: \"alice@example.com\", total: {$gt: 100}}).limit(1); f() / 2",
+    "selection": [
+      0,
+      92
+    ],
+    "result": null,
+    "refused": "JavaScript may read this differently"
+  },
+  {
+    "document": "db.orders.find({status: \"paid\", customer: \"alice@example.com\", total: {$gt: 100}}).limit(1); x = \"\\1\"",
+    "selection": [
+      0,
+      92
+    ],
+    "result": null,
+    "refused": "Invalid escape sequence"
+  },
+  {
+    "document": "db.orders.aggregate([{$match: {status: \"paid\", total: {$gt: 100}}}, {$out: \"paid_orders_archive\"}]).explain()\ndb.b.find() / 2",
+    "selection": [
+      0,
+      109
+    ],
+    "result": "db.orders.aggregate([\n  { $match: { status: \"paid\", total: { $gt: 100 } } },\n  { $out: \"paid_orders_archive\" }\n])\n  .explain()\ndb.b.find() / 2",
+    "refused": null
+  },
+  {
+    "document": "db.a.find({x :1})\n\n\n\"\\1\"",
+    "selection": [
+      11,
+      15
+    ],
+    "result": "db.a.find({ x: 1 })\n\n\n\"\\1\"",
+    "refused": null
+  },
+  {
+    "document": "db.a.find({x :1})\ndb.b.find(\"a\\\nb\") / 2",
+    "selection": [
+      11,
+      15
+    ],
+    "result": "db.a.find({ x: 1 })\ndb.b.find(\"a\\\nb\") / 2",
+    "refused": null
+  },
+  {
+    "document": "db.a.find({x :1}); db.b.find(\"a\\\nb\") / 2",
+    "selection": [
+      11,
+      15
+    ],
+    "result": null,
+    "refused": "JavaScript may read this differently"
+  },
+  {
+    "document": "db.a.find({x :1})\ndb.b.find(`a\nb${x}`)",
+    "selection": [
+      11,
+      15
+    ],
+    "result": "db.a.find({ x: 1 })\ndb.b.find(`a\nb${x}`)",
+    "refused": null
+  },
+  {
+    "document": "a\n/x/",
+    "selection": [
+      2,
+      5
+    ],
+    "result": null,
+    "refused": "This selection reads differently without the text before it"
+  }
+]

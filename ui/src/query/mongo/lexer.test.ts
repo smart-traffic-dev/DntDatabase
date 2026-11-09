@@ -42,7 +42,7 @@ describe('lexConsole', () => {
     expect(problem("'\\uD83D'")).toEqual({ offset: 1, message: 'Invalid escape sequence' });
     expect(problem("'\\1'")).toEqual({ offset: 1, message: 'Invalid escape sequence' });
     // A line continuation, and U+2028 inside a string.
-    expect(texts("'a\\\nb' 'c d'")).toEqual(["string:'a\\\nb'", "string:'c d'"]);
+    expect(texts("'a\\\nb' 'c\u2028d'")).toEqual(["string:'a\\\nb'", "string:'c\u2028d'"]);
   });
 
   it('regex_versus_division', () => {
@@ -83,14 +83,14 @@ describe('lexConsole', () => {
   });
 
   it('line_comments_end_at_every_line_terminator', () => {
-    for (const src of ['a // b\rc', 'a // b c', 'a // b c', 'a // b\r\nc']) {
+    for (const src of ['a // b\rc', 'a // b\u2028c', 'a // b\u2029c', 'a // b\r\nc']) {
       const r = lexConsole(src);
       expect(r.tokens.map((t) => t.text), JSON.stringify(src)).toEqual(['a', 'c']);
       expect(r.comments.map((c) => c.text)).toEqual(['// b']);
     }
     // U+FEFF is whitespace, as in JavaScript.
     expect(texts('﻿a﻿')).toEqual(['ident:a']);
-    expect(problem('x(/a /)')).toEqual({ offset: 2, message: 'Unterminated regular expression' });
+    expect(problem('x(/a\u2028/)')).toEqual({ offset: 2, message: 'Unterminated regular expression' });
     // A `//` comment ending the text is closed; a block comment must close.
     expect(lexConsole('a // b').comments).toEqual([{ text: '// b', start: 2, end: 6, line: true }]);
     expect(problem('a /* open')).toEqual({ offset: 2, message: 'Unterminated comment' });

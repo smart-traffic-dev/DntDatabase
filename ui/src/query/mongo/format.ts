@@ -11,7 +11,7 @@
 // Layout: a document, array or argument list goes on one line when it fits the print width,
 // else one entry per line; a chain `db.c.find(…).sort(…).limit(…)` that does not fit puts
 // each `.modifier(…)` after its first call on a line of its own.
-import { lexConsole, type ConsoleComment as Comment, type ConsoleToken as Token } from './lexer';
+import { consoleCut, lexConsole, type ConsoleComment as Comment, type ConsoleToken as Token } from './lexer';
 
 export interface FormatMongoOptions {
   /** Columns a line may take, its indent included. Default 80. */
@@ -125,6 +125,8 @@ function print(doc: Doc, printWidth: number, eol: string): string {
   const out: string[] = [];
   let pos = 0;
   let suffixes: string[] = [];
+  /** Nothing but the indent on the current line yet. */
+  let atLineStart = true;
   const trimEnd = () => {
     while (out.length > 0) {
       const last = out[out.length - 1]!;
@@ -143,6 +145,7 @@ function print(doc: Doc, printWidth: number, eol: string): string {
       out.push(d);
       const nl = d.lastIndexOf('\n');
       pos = nl >= 0 ? width(d.slice(nl + 1)) : pos + width(d);
+      if (d !== '') atLineStart = false;
     } else if (Array.isArray(d)) {
       for (let i = d.length - 1; i >= 0; i--) stack.push([ind, mode, d[i]!]);
     } else {
@@ -154,14 +157,16 @@ function print(doc: Doc, printWidth: number, eol: string): string {
               pos++;
             }
           } else if (suffixes.length > 0) {
-            // The end of the line: its `//` comments first.
+            // The end of the line: its `//` comment first (on a line of its own if it has none).
             stack.push([ind, mode, d]);
-            for (let i = suffixes.length - 1; i >= 0; i--) stack.push([ind, mode, suffixes[i]!]);
+            const [first] = suffixes;
+            stack.push([ind, mode, atLineStart ? first!.trimStart() : first!]);
             suffixes = [];
           } else {
             trimEnd();
             out.push(eol + ' '.repeat(ind));
             pos = ind;
+            atLineStart = true;
           }
           break;
         case 'group':
@@ -176,14 +181,19 @@ function print(doc: Doc, printWidth: number, eol: string): string {
           stack.push([ind + INDENT, mode, d.d]);
           break;
         case 'suffix':
-          suffixes.push(d.s);
+          // A line has one `//` comment: a second one goes to the next line. (The token it
+          // follows has a line break after it, so this never splits a command.)
+          if (suffixes.length > 0) {
+            stack.push([ind, mode, d]);
+            stack.push([ind, 'break', hardline]);
+          } else suffixes.push(d.s);
           break;
         case 'breakParent':
           break;
       }
     }
   }
-  out.push(...suffixes);
+  if (suffixes[0] !== undefined) out.push(atLineStart ? suffixes[0].trimStart() : suffixes[0]);
   trimEnd();
   return out.join('');
 }
@@ -293,7 +303,7 @@ function tokenAt(tokens: { start: number }[], offset: number): number {
  * them. `blank`: an empty line before it; `sameLine`: it goes on the line of the entry before
  * (a `/* … *\/` comment that code follows on its line).
  */
-type EntryBody = { e: 'comment'; c: Comment } | { e: 'statement'; terms: Term[]; last: Tok; semi: Tok | null };
+type EntryBody = { e: 'comment'; c: Comment } | { e: 'statement'; terms: Term[]; first: Tok; last: Tok; semi: Tok | null };
 type Entry = EntryBody & { blank: boolean; sameLine: boolean };
 
 function buildEntries(src: string, tokens: Token[], comments: Comment[]): Entry[] {
@@ -352,7 +362,7 @@ function buildEntries(src: string, tokens: Token[], comments: Comment[]): Entry[
     const last = toks.get(tokens[s.to - 1]!)!;
     const semi = s.semi === null ? null : toks.get(tokens[s.semi]!)!;
     const end = semi ?? last;
-    push({ e: 'statement', terms: parseTerms(tokens, s.from, s.to, toks), last, semi }, first.tok.start, end.trail.at(-1)?.end ?? end.tok.end);
+    push({ e: 'statement', terms: parseTerms(tokens, s.from, s.to, toks), first, last, semi }, first.tok.start, end.trail.at(-1)?.end ?? end.tok.end);
     prevInline = false;
   }
   pushComments(endComments.map((c) => ({ c, newlineAfter: true })));
@@ -638,6 +648,15 @@ export function formatMongo(text: string, opts?: FormatMongoOptions): FormatMong
     // A token or comment over lines keeps its own line breaks.
     for (const t of [...tokens, ...comments]) if (t.text.includes('\n')) t.text = text.slice(original(t.start), original(t.end));
   }
+  for (const c of comments) {
+    // A `//` comment that U+2028 / U+2029 ends goes with it, in place: a line break of the
+    // layout after it would end a command there.
+    const end = src[c.end];
+    if (c.line && (end === '\u2028' || end === '\u2029')) {
+      c.text += end;
+      c.line = false;
+    }
+  }
   const entries = buildEntries(src, tokens, comments);
   const docs: Doc[] = [];
   entries.forEach((entry, i) => {
@@ -649,12 +668,33 @@ export function formatMongo(text: string, opts?: FormatMongoOptions): FormatMong
       const end = entry.semi ?? entry.last;
       const trail = end.trail;
       end.trail = [];
-      docs.push(termsDoc(entry.terms), entry.semi ? ';' : '', ...trail.map((c) => ' ' + c.text));
+      docs.push(
+        rawStatement(entry, text, original) ?? termsDoc(entry.terms),
+        entry.semi ? ';' : '',
+        ...trail.map((c): Doc => (c.line ? { k: 'suffix', s: ' ' + c.text } : ' ' + c.text)),
+      );
     }
   });
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
   const out = print(docs, opts?.printWidth ?? 80, eol);
   return { ok: true, text: /\n[ \t]*$/.test(src) ? out + eol : out };
+}
+
+/**
+ * After `use` / `show` the console reads raw text (`parse_use` in parse.rs): such a statement
+ * stays as written, but for one blank after its keyword. Null for any other statement.
+ */
+function rawStatement(entry: Extract<Entry, { e: 'statement' }>, text: string, original: (offset: number) => number): string | null {
+  const first = entry.first.tok;
+  if (first.kind !== 'ident' || (first.text !== 'use' && first.text !== 'show')) return null;
+  const end = original(entry.last.tok.end);
+  const second = entry.terms[1];
+  const next = second ? (second.t === 'tok' ? second.tok : second.open) : null;
+  if (next && next.lead.length === 0 && entry.first.trail.length === 0) {
+    const from = original(next.tok.start);
+    if (/^[ \t]+$/.test(text.slice(original(first.end), from))) return `${first.text} ${text.slice(from, end)}`;
+  }
+  return text.slice(original(first.start), end);
 }
 
 export type FormatMongoRangeResult = { ok: true; from: number; to: number; text: string } | { ok: false; message: string; offset: number };
@@ -664,12 +704,17 @@ export type FormatMongoRangeResult = { ok: true; from: number; to: number; text:
  * (the console's statements, with their `;`), formatted. The result replaces exactly
  * `[from, to)` of the result, from the first statement's first token to the last one's last:
  * never a part of a comment, so commented-out code stays a comment. Null when the selection
- * touches no statement (it lies in comments or blank space). Refused where the script stops
- * lexing inside these statements, and when they would read another way without the text
- * before them (a leading `/`).
+ * touches no statement (it lies in comments or blank space). Refused, as the whole script is,
+ * when the script stops lexing and these statements reach the line where the console's
+ * reading stops (`consoleCut`), and when they would read another way without the text before
+ * them (a leading `/`).
  */
 export function formatMongoRange(text: string, from: number, to: number, opts?: FormatMongoOptions): FormatMongoRangeResult | null {
-  const { tokens, comments, problem } = lexConsole(text);
+  const lexed = lexConsole(text);
+  const { tokens, comments, problem } = lexed;
+  // From here on the console reads the text another way (a line it cannot lex is one refused
+  // command): no formatted statement may reach it.
+  const cut = consoleCut(text, lexed);
   // The text that does not lex, as one token of its statement.
   if (problem) tokens.splice(tokenAt(tokens, problem.offset), Infinity, { kind: 'punct', text: '', start: problem.offset, end: text.length });
   let lo = Infinity;
@@ -685,7 +730,7 @@ export function formatMongoRange(text: string, from: number, to: number, opts?: 
     if (problem && s.to === tokens.length) bad = true;
   }
   if (lo > hi) return null;
-  if (problem && bad) return { ok: false, message: problem.message, offset: problem.offset };
+  if (problem && (bad || hi > cut)) return { ok: false, message: problem.message, offset: problem.offset };
   // On their own, the statements must read as they do in the script.
   const own = lexConsole(text.slice(lo, hi));
   const inScript = tokens.filter((t) => t.start >= lo && t.end <= hi);

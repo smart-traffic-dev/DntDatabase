@@ -444,6 +444,38 @@ describe('formatMongoRange', () => {
     const s = 'a\n/x/';
     expect(sel(s, '/x/')).toEqual({ ok: false, message: 'This selection reads differently without the text before it', offset: 2 });
   });
+
+  it('a_statement_on_a_line_the_console_cannot_lex_is_refused', () => {
+    // The console reads that whole line as one refused command: laying out its first
+    // statement over lines would let them run on their own (the `$out` without `.explain()`).
+    for (const [doc, selected, bad] of [
+      ['db.orders.aggregate([{$match: {status: "paid", total: {$gt: 100}}}, {$out: "paid_orders_archive"}]).explain(); db.b.find() / 2', '.explain();', '/ 2'],
+      ['db.orders.find({status: "paid", customer: "alice@example.com", total: {$gt: 100}}).limit(1); f() / 2', '.limit(1);', '/ 2'],
+      ['db.orders.find({status: "paid", customer: "alice@example.com", total: {$gt: 100}}).limit(1); x = "\\1"', '.limit(1);', '\\1'],
+    ] as const) {
+      const message = formatMongo(doc);
+      expect(message.ok).toBe(false);
+      expect(formatMongoRange(doc, 0, doc.indexOf(selected) + selected.length), doc).toEqual(message);
+      expect((message as { offset: number }).offset).toBe(doc.indexOf(bad));
+    }
+  });
+
+  it('a_bad_line_after_the_selection_leaves_it_formattable', () => {
+    const doc = 'db.a.find({x :1})\n\ndb.b.find() / 2';
+    expect(sel(doc, 'x :1')).toEqual({ ok: true, from: 0, to: 17, text: 'db.a.find({ x: 1 })' });
+    // A bad construct starts the line, after blank lines.
+    expect(sel('db.a.find({x :1})\n\n\n"\\1"', 'x :1')).toEqual({ ok: true, from: 0, to: 17, text: 'db.a.find({ x: 1 })' });
+  });
+
+  it('the_console_backs_off_to_where_a_string_over_lines_began', () => {
+    // The bad line is the third, but its string began on the second, after a line
+    // continuation: the console backs off to the second line. The first still formats.
+    const doc = 'db.a.find({x :1})\ndb.b.find("a\\\nb") / 2';
+    expect(sel(doc, 'x :1')).toEqual({ ok: true, from: 0, to: 17, text: 'db.a.find({ x: 1 })' });
+    // On one line with that string: refused.
+    const same = 'db.a.find({x :1}); db.b.find("a\\\nb") / 2';
+    expect(sel(same, 'x :1')).toEqual(formatMongo(same));
+  });
 });
 
 describe('formatMongo: the console reading', () => {
@@ -466,7 +498,9 @@ describe('formatMongo: the console reading', () => {
 
   it('a_line_comment_ends_where_the_console_ends_it', () => {
     // U+2028 ends a `//` comment but not a command: the chain goes on.
-    expect(fmt('db.c // x  .find({a: 1})\n.limit(1)')).toBe(lines('db.c.find({ a: 1 }) // x', '  .limit(1)'));
+    // Its comment stays before the code, with its U+2028 (a `\n` there would split the command).
+    expect(fmt('db.c // x\u2028 .find({a: 1})\n.limit(1)')).toBe('db.c // x\u2028 .find({ a: 1 }).limit(1)');
+    expect(fmt('db.c.find({a: [1, 2]}) // x\u2028 db.c.drop()')).toBe('db.c.find({ a: [1, 2] }) // x\u2028 db.c.drop()');
     expect(fmt('db.c.find() // x\rdb.d.find()')).toBe('db.c.find() // x\ndb.d.find()');
   });
 
@@ -479,5 +513,12 @@ describe('formatMongo: the console reading', () => {
 
   it('use_names_the_console_reads_raw', () => {
     expect(fmt('use   2024-logs\nuse\t01_x')).toBe('use 2024-logs\nuse 01_x');
+    // After `use` / `show` the console reads raw text: it stays as written.
+    expect(fmt('use (x)\nuse a . b\nshow  ( x )')).toBe('use (x)\nuse a . b\nshow ( x )');
+  });
+
+  it('a_second_line_comment_starts_its_own_line', () => {
+    expect(fmt('db.c.find({a: [] // c7\n, // c3\nb: 1})')).toBe(lines('db.c.find({', '  a: [], // c7', '  // c3', '  b: 1', '})'));
+    expect(fmt('db.c // a\n.find() // b')).toBe(lines('db.c.find() // a', '// b'));
   });
 });

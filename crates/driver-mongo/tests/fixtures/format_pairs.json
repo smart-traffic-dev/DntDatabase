@@ -56,6 +56,18 @@
     "formatted": "use 2024_logs\nshow dbs\nuse 01-x"
   },
   {
+    "input": "use (x)\nuse a . b\nshow  ( x )",
+    "formatted": "use (x)\nuse a . b\nshow ( x )"
+  },
+  {
+    "input": "db.c.find({a: [] // c7\n, // c3\nb: 1})\ndb.c // a\n.find() // b",
+    "formatted": "db.c.find({\n  a: [], // c7\n  // c3\n  b: 1\n})\ndb.c.find() // a\n// b"
+  },
+  {
+    "input": "db.c.find({a: [1, 2]}) // x  db.c.drop()",
+    "formatted": "db.c.find({ a: [1, 2] }) // x  db.c.drop()"
+  },
+  {
     "input": "db.a.find()\n\n\n\ndb.b.find()\ndb.c.find()",
     "formatted": "db.a.find()\n\ndb.b.find()\ndb.c.find()"
   },
@@ -121,7 +133,7 @@
   },
   {
     "input": "db.c // x  .find({a: 1})\n.limit(1)",
-    "formatted": "db.c.find({ a: 1 }) // x\n  .limit(1)"
+    "formatted": "db.c // x  .find({ a: 1 }).limit(1)"
   },
   {
     "input": "db.c.find({a: 1}) // x\rdb.c.drop()",
@@ -129,7 +141,7 @@
   },
   {
     "input": "db.c.find({a: 1}) // x db.c.drop()",
-    "formatted": "db.c.find({ a: 1 }) db.c.drop() // x"
+    "formatted": "db.c.find({ a: 1 }) // x  db.c.drop()"
   },
   {
     "input": "db.c.find().forEach(d => /(a,b)/.test(d.name))",

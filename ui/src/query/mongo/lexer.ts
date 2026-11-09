@@ -345,6 +345,44 @@ function rawUseName(text: string, pos: number, bad: number, cur: ConsoleToken[])
   };
 }
 
+/** `line_start` in mod.rs: the start of the line holding `i` (lines end at LF, CR or CRLF). */
+function lineStart(text: string, i: number): number {
+  for (let k = Math.min(i, text.length) - 1; k >= 0; k--) {
+    if (text[k] === '\n' || text[k] === '\r') return k + 1;
+  }
+  return 0;
+}
+
+/**
+ * Up to where the console still reads `text` as the tokens `lexed` holds, when it stops
+ * lexing (`lex_script` in mod.rs): the start of the line where the failing construct begins,
+ * backed off to earlier line starts while the text before it does not lex, as
+ * `lexable_prefix` does (a string continued over lines, a comment). From there on the console
+ * reads the text as one refused command, or not at all. Conservative: it backs off from the
+ * start of the text, never only to where the console resumed after a raw `use` name. The
+ * whole text when it lexes.
+ */
+export function consoleCut(text: string, lexed: ReturnType<typeof lexConsole>): number {
+  const { problem } = lexed;
+  if (!problem) return text.length;
+  // The failing construct begins at the first character after what was read.
+  let begin = Math.max(lexed.tokens.at(-1)?.end ?? 0, lexed.comments.at(-1)?.end ?? 0);
+  while (begin < problem.offset) {
+    const c = String.fromCodePoint(text.codePointAt(begin)!);
+    if (!isSpace(c)) break;
+    begin += c.length;
+  }
+  let cut = lineStart(text, Math.min(begin, problem.offset));
+  for (let i = 0; i < 16; i++) {
+    const before = lexConsole(text.slice(0, cut)).problem;
+    if (!before) return cut;
+    const next = lineStart(text, before.offset);
+    if (next >= cut) return 0;
+    cut = next;
+  }
+  return 0;
+}
+
 /**
  * The tokens and comments of a script as the console reads it. `problem`: where it stops
  * (the tokens and comments before it are returned); the console would read the text from

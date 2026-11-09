@@ -1,11 +1,11 @@
 import { expect, it } from 'vitest';
-import { formatMongo } from './format';
+import { formatMongo, formatMongoRange } from './format';
 
 // The formatter's [input, formatted] pairs, written to a fixture that the console's own
 // test reads (`formatted_scripts_run_the_same_commands` in
 // `crates/driver-mongo/src/shell/parse.rs`): splitting and parsing the formatted text
 // there must give the commands of the input. This test fails when the fixture is stale.
-// Regenerate it with: pnpm --dir ui test -u format.pairs
+// Regenerate both fixtures with: pnpm --dir ui test -u format.pairs
 const FIXTURE = '../../../../crates/driver-mongo/tests/fixtures/format_pairs.json';
 
 const INPUTS = [
@@ -25,6 +25,9 @@ const INPUTS = [
   // Statements.
   'use shop\ndb.a.find();db.b.find( ) ;  db.c.find()',
   'use   2024_logs\nshow    dbs\nuse 01-x',
+  'use (x)\nuse a . b\nshow  ( x )',
+  'db.c.find({a: [] // c7\n, // c3\nb: 1})\ndb.c // a\n.find() // b',
+  'db.c.find({a: [1, 2]}) // x  db.c.drop()',
   'db.a.find()\n\n\n\ndb.b.find()\ndb.c.find()',
   '\n\n  db.a.find()  ;;\n\n',
   'db.a.find({x:1})\r\n\r\n\r\ndb.b.find()\r\n',
@@ -58,6 +61,44 @@ const INPUTS = [
   'db.c.find({a:1;})',
   'x = 1\ndb.c.find({a: 01})',
 ];
+
+// Format with a selection: [document, from, to] (the first occurrences of two snippets). The
+// fixture holds the document after Format, or the refusal; the console's test splits and
+// parses the document before and after.
+const SELECTIONS_FIXTURE = '../../../../crates/driver-mongo/tests/fixtures/format_selections.json';
+
+const SELECTIONS: [document: string, from: string, to: string][] = [
+  ['db.a.find()\ndb.b.find({\n  x: 1\n})\n  .limit(1); db.c.find( )\n', 'x: 1', 'x: 1'],
+  ['db.a.find( )\ndb.b.find({\n  x: 1\n})\n  .limit(1); db.c.find( )\n', 'a.find', 'db.b'],
+  // Comments: nothing, or the statements only.
+  ['db.a.find()\n// old: db.c.find(); db.c.drop()\ndb.b.find()', 'db.c.find();', 'db.c.drop()'],
+  ['db.a.find() // keep; db.c.drop()\ndb.b.find({x :1})', 'keep;', 'db.b.find({x :1})'],
+  ['db.a.find( )\n/* example: {a :1} */\ndb.b.find( )', ':1}', 'db.b'],
+  ['db.a.find( /* example: {a :1} */ )', 'example', 'example'],
+  // A line the console cannot lex: refused when the selection is on it.
+  ['db.orders.aggregate([{$match: {status: "paid", total: {$gt: 100}}}, {$out: "paid_orders_archive"}]).explain(); db.b.find() / 2', 'db.orders', '.explain();'],
+  ['db.orders.find({status: "paid", customer: "alice@example.com", total: {$gt: 100}}).limit(1); f() / 2', 'db.orders', '.limit(1);'],
+  ['db.orders.find({status: "paid", customer: "alice@example.com", total: {$gt: 100}}).limit(1); x = "\\1"', 'db.orders', '.limit(1);'],
+  // A bad line after the selection, on another line: formatted.
+  ['db.orders.aggregate([{$match: {status: "paid", total: {$gt: 100}}}, {$out: "paid_orders_archive"}]).explain()\ndb.b.find() / 2', 'db.orders', '.explain()'],
+  ['db.a.find({x :1})\n\n\n"\\1"', 'x :1', 'x :1'],
+  ['db.a.find({x :1})\ndb.b.find("a\\\nb") / 2', 'x :1', 'x :1'],
+  ['db.a.find({x :1}); db.b.find("a\\\nb") / 2', 'x :1', 'x :1'],
+  ['db.a.find({x :1})\ndb.b.find(`a\nb${x}`)', 'x :1', 'x :1'],
+  // On its own the statement reads another way.
+  ['a\n/x/', '/x/', '/x/'],
+];
+
+it('the_selection_fixture_holds_the_current_output_of_formatMongoRange', async () => {
+  const entries = SELECTIONS.map(([document, a, b]) => {
+    const from = document.indexOf(a);
+    const to = document.indexOf(b, from) + b.length;
+    const r = formatMongoRange(document, from, to);
+    const result = r?.ok ? document.slice(0, r.from) + r.text + document.slice(r.to) : null;
+    return { document, selection: [from, to], result, refused: r === null ? 'Nothing to format' : r.ok ? null : r.message };
+  });
+  await expect(JSON.stringify(entries, null, 2) + '\n').toMatchFileSnapshot(SELECTIONS_FIXTURE);
+});
 
 it('the_fixture_holds_the_current_output_of_formatMongo', async () => {
   const pairs = INPUTS.map((input) => {

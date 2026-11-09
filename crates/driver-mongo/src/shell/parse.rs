@@ -1302,6 +1302,30 @@ mod tests {
         assert!(checked >= 30, "{checked}");
     }
 
+    /// Format with a selection (`formatMongoRange`, written by the same UI test into
+    /// `format_selections.json`): the document after it runs the commands of the document
+    /// before it, or the format was refused and the document stays as it is.
+    #[test]
+    fn selection_formats_run_the_same_commands() {
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/fixtures/format_selections.json"))
+                .expect("format_selections.json");
+        assert!(entries.len() >= 15, "{}", entries.len());
+        for entry in &entries {
+            let document = entry["document"].as_str().expect("document");
+            match (entry["result"].as_str(), entry["refused"].as_str()) {
+                (Some(result), None) => assert_eq!(
+                    commands_of(result),
+                    commands_of(document),
+                    "{document:?}\nselection {}\nformatted as\n{result:?}",
+                    entry["selection"]
+                ),
+                (None, Some(_)) => {}
+                other => panic!("{document:?}: {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn split_never_runs_what_javascript_reads_as_text() {
         for text in [
