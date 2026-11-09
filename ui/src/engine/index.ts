@@ -144,6 +144,23 @@ export const SQL_LANGUAGES: readonly string[] = [editorLanguage('mysql'), editor
 /** Monaco context expression "the editor shows a SQL language" (an action's precondition). */
 export const SQL_EDITOR_WHEN = SQL_LANGUAGES.map((l) => `editorLangId == ${l}`).join(' || ');
 
+/** The Monaco language the MongoDB console completion serves. */
+export const MONGO_LANGUAGE: string = editorLanguage('mongo');
+
+/** Whether the query editor of a kind gets the MongoDB console completion (SQL kinds have their own; Redis none). */
+export function hasMongoCompletion(kind: DbKind): boolean {
+  switch (kind) {
+    case 'mongo':
+      return true;
+    case 'mysql':
+    case 'postgres':
+    case 'redis':
+      return false;
+    default:
+      return assertNever(kind);
+  }
+}
+
 export function engineChip(kind: DbKind): 'MY' | 'PG' | 'MG' | 'RD' {
   switch (kind) {
     case 'mysql':
@@ -226,4 +243,4 @@ export function namespaceModel(kind: DbKind): NamespaceModel {
   return defaultCaps(kind).namespaces;
 }
 
-export { canSample, sampleQuery, selectTopSql, type SelectOptions } from './sampleQuery';
+export { canSample, mongoCollectionMember, sampleQuery, selectTopSql, type SelectOptions } from './sampleQuery';

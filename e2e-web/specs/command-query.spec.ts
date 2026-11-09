@@ -169,4 +169,37 @@ test.describe('query tab of a Redis connection (browser, fake IPC backend)', () 
     expect(backend.calls.filter((c) => c.cmd === 'query_run')).toEqual([]);
     expect(backend.command.redis.get(0)?.size).toBe(5);
   });
+
+  test('a MongoDB tab suggests the collections after db. and the sampled fields in a filter', async ({ page }) => {
+    const backend = await setup(page);
+    await newTab(page, 'docs');
+    const suggestion = (label: string) =>
+      page.getByTestId('query-editor').locator('.suggest-widget .monaco-list-row .label-name', { hasText: new RegExp(`^${label}$`) });
+
+    await editor(page).click();
+    await page.keyboard.type('db.');
+    await expect(suggestion('orders')).toBeVisible();
+    // Database methods come with the collections; collection methods do not.
+    await expect(suggestion('getSiblingDB')).toHaveCount(1);
+    await expect(suggestion('insertOne')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+
+    await page.keyboard.type('orders.find({');
+    // The fields `table_detail` sampled from `shop.orders`.
+    await expect(suggestion('status')).toBeVisible();
+    await expect(suggestion('customer')).toHaveCount(1);
+    expect(backend.calls.filter((c) => c.cmd === 'table_detail').at(-1)?.args).toMatchObject({
+      id: ids.legacy,
+      obj: { database: 'shop', name: 'orders', kind: 'Collection' },
+    });
+
+    await page.keyboard.press('Enter');
+    await expect(editor(page)).toContainText('db.orders.find({_id})');
+
+    // A Redis tab gets no suggestions.
+    await newTab(page, 'cache');
+    await editor(page).click();
+    await page.keyboard.type('db.');
+    await expect(page.getByTestId('query-editor').locator('.suggest-widget.visible')).toHaveCount(0);
+  });
 });

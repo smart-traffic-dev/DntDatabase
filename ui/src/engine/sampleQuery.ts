@@ -43,9 +43,14 @@ const DB_MEMBERS: ReadonlySet<string> = new Set([
 
 const JS_IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
+/** What follows `db.` to reach a collection: its plain name, else `getCollection("<name>")`. */
+export function mongoCollectionMember(name: string): string {
+  return JS_IDENT.test(name) && !DB_MEMBERS.has(name) ? name : `getCollection(${JSON.stringify(name)})`;
+}
+
 /** `db.<name>` for a plain collection name, else `db.getCollection("<name>")`. */
 function mongoCollection(name: string): string {
-  return JS_IDENT.test(name) && !DB_MEMBERS.has(name) ? `db.${name}` : `db.getCollection(${JSON.stringify(name)})`;
+  return `db.${mongoCollectionMember(name)}`;
 }
 
 /** Object kinds a sample query is offered for, per engine; Redis has no collections. */

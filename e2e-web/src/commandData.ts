@@ -12,6 +12,7 @@ import type {
   ServerInfo,
   SortSpec,
   TableDataPage,
+  TableDetail,
   Value,
 } from '../../ui/src/bindings';
 import { Failure, appError } from '../../ui/src/test/fixtures/data';
@@ -221,6 +222,32 @@ export function createCommandData(
         elapsed_ms: 1,
       };
       return page;
+    },
+
+    // As the driver: one column per sampled top-level field, no primary key, the `_id_` index.
+    table_detail: (args) => {
+      const obj = args.obj as ObjectRef;
+      const docs = docsOf(args.id as string, obj);
+      if (!docs) return or('table_detail', args);
+      const base = or('table_detail', args) as TableDetail;
+      const detail: TableDetail = {
+        ...base,
+        object: obj,
+        columns: fieldsOf(docs).map((name, i) => ({
+          ...base.columns[0]!,
+          name,
+          ordinal: i + 1,
+          db_type: name === '_id' ? 'objectId' : 'mixed',
+          nullable: name !== '_id',
+          default: null,
+          auto_increment: false,
+          identity: null,
+          comment: null,
+        })),
+        primary_key: null,
+        indexes: [],
+      };
+      return detail;
     },
 
     table_row_count: (args) => {

@@ -4,6 +4,7 @@
 // same window the backend keeps a failed load.
 import { commands, type CompletionObject, type Result } from '../bindings';
 import type { CompletionScope } from '../query/completion/provider';
+import type { MongoField, MongoObject } from '../query/completion/mongo/suggest';
 import { isKind, type SqlEngine } from '../engine';
 import { useConnections } from './connections';
 
@@ -78,6 +79,29 @@ function objectsEntry(connId: string, db: string | null, engine: SqlEngine, qual
   );
 }
 
+// MongoDB console completion: collections and views of a database, the sampled fields of a
+// collection (`table_detail` samples 100 documents), and the database names.
+const mongoObjectsKey = (connId: string, db: string, showSystem: boolean) => key('mongoObjects', connId, db, showSystem ? '1' : '0');
+const loadMongoObjects = (connId: string, db: string, showSystem: boolean) => async (): Promise<MongoObject[] | null> => {
+  const scope = { database: db, schema: null };
+  const [colls, views] = await Promise.all([
+    value(commands.listObjects(connId, scope, 'Collection', showSystem)),
+    value(commands.listObjects(connId, scope, 'View', showSystem)),
+  ]);
+  if (!colls) return null;
+  return [...colls, ...(views ?? [])].map((o) => ({ name: o.name, kind: o.kind === 'View' ? 'View' : 'Collection' }));
+};
+const mongoFieldsKey = (connId: string, db: string, obj: MongoObject) => key('mongoFields', connId, db, obj.kind, obj.name);
+const loadMongoFields = (connId: string, db: string, obj: MongoObject) => async (): Promise<MongoField[] | null> => {
+  const detail = await value(commands.tableDetail(connId, { database: db, schema: null, name: obj.name, kind: obj.kind }));
+  return detail ? detail.columns.map((c) => ({ name: c.name, type: c.db_type })) : null;
+};
+const mongoDatabasesKey = (connId: string, showSystem: boolean) => key('mongoDatabases', connId, showSystem ? '1' : '0');
+const loadMongoDatabases = (connId: string, showSystem: boolean) => async () => {
+  const list = await value(commands.listDatabases(connId, showSystem));
+  return list ? list.map((d) => d.name) : null;
+};
+
 export const useCompletion = {
   /** The tables, views and columns of `db` for the tab's connection. */
   scope(connId: string, db: string): Promise<CompletionScope | null> {
@@ -126,6 +150,30 @@ export const useCompletion = {
       if (kind === 'scope' && connId && db !== undefined && value) out.push({ connId, db, scope: value });
     }
     return out;
+  },
+  /** Collections and views of a MongoDB database (`null` when the load failed). */
+  mongoObjects(connId: string, db: string, showSystem: boolean): Promise<MongoObject[] | null> {
+    return cached<MongoObject[] | null>(mongoObjectsKey(connId, db, showSystem), loadMongoObjects(connId, db, showSystem), null);
+  },
+  /** `mongoObjects` if already loaded, else `undefined` (the load is started). */
+  peekMongoObjects(connId: string, db: string, showSystem: boolean): MongoObject[] | null | undefined {
+    return peekOf(entry<MongoObject[] | null>(mongoObjectsKey(connId, db, showSystem), loadMongoObjects(connId, db, showSystem), null));
+  },
+  /** The sampled top-level fields of a MongoDB collection or view (`null` when the load failed). */
+  mongoFields(connId: string, db: string, obj: MongoObject): Promise<MongoField[] | null> {
+    return cached<MongoField[] | null>(mongoFieldsKey(connId, db, obj), loadMongoFields(connId, db, obj), null);
+  },
+  /** `mongoFields` if already loaded, else `undefined` (the load is started). */
+  peekMongoFields(connId: string, db: string, obj: MongoObject): MongoField[] | null | undefined {
+    return peekOf(entry<MongoField[] | null>(mongoFieldsKey(connId, db, obj), loadMongoFields(connId, db, obj), null));
+  },
+  /** The databases of a MongoDB connection (`use `). */
+  mongoDatabases(connId: string, showSystem: boolean): Promise<string[] | null> {
+    return cached<string[] | null>(mongoDatabasesKey(connId, showSystem), loadMongoDatabases(connId, showSystem), null);
+  },
+  /** `mongoDatabases` if already loaded, else `undefined` (the load is started). */
+  peekMongoDatabases(connId: string, showSystem: boolean): string[] | null | undefined {
+    return peekOf(entry<string[] | null>(mongoDatabasesKey(connId, showSystem), loadMongoDatabases(connId, showSystem), null));
   },
   /** Drops what is cached for `db` of the connection (and its qualifier lists). */
   invalidate(connId: string, db: string): void {

@@ -6,8 +6,9 @@ import { bindEditorFontScale, editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
 import { bindAiKeys, ensureAiInline } from '../../query/ai/inlineProvider';
 import { ensureCompletion, prefetchCompletion } from '../../query/completion/monacoProvider';
+import { ensureMongoCompletion, prefetchMongoCompletion } from '../../query/completion/mongo/monacoProvider';
 import type { DbKind } from '../../bindings';
-import { editorLanguage, editorPlaceholder, sqlEngine } from '../../engine';
+import { editorLanguage, editorPlaceholder, hasMongoCompletion, sqlEngine } from '../../engine';
 import { registerCommandLanguages } from '../../engine/monaco';
 import { clearCursor, reportCursor } from '../../store/cursor';
 import { exportRunOf, useExporting } from '../../store/queryExport';
@@ -130,10 +131,12 @@ function SqlEditorView({ doc, engine: kind, onMount }: SqlEditorProps) {
   const { connectionId, database } = doc;
   // Null for a Command language: no SQL autocomplete to load.
   const engine = sqlEngine(kind);
+  const mongo = hasMongoCompletion(kind);
   // Load the schema for autocomplete as soon as the editor opens, not on the first suggestion.
   useEffect(() => {
     if (engine) prefetchCompletion({ tabId: doc.id, connId: connectionId, db: database, engine });
-  }, [doc.id, connectionId, database, engine]);
+    else if (mongo) prefetchMongoCompletion(connectionId, database);
+  }, [doc.id, connectionId, database, engine, mongo]);
   // The Command languages exist before the editor makes its model (registered once per monaco).
   const beforeMount: BeforeMount = (monaco) => {
     registerCommandLanguages(monaco);
@@ -162,6 +165,7 @@ function SqlEditorView({ doc, engine: kind, onMount }: SqlEditorProps) {
         }}
         onMount={(editor, monaco) => {
           ensureCompletion(monaco);
+          ensureMongoCompletion(monaco);
           ensureAiInline(monaco);
           editors.set(doc.id, editor);
           editor.onDidDispose(() => {
