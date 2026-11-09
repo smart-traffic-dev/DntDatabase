@@ -157,11 +157,19 @@ function print(doc: Doc, printWidth: number, eol: string): string {
               pos++;
             }
           } else if (suffixes.length > 0) {
-            // The end of the line: its `//` comment first (on a line of its own if it has none).
+            // The end of the line: its `//` comment first (alone on it if it has nothing else).
+            // A line has one `//` comment: the others start the next lines, at the indent of
+            // what follows, as comments before its first token. (No line break is added
+            // between two tokens: they all come at this one.)
             stack.push([ind, mode, d]);
-            const [first] = suffixes;
-            stack.push([ind, mode, atLineStart ? first!.trimStart() : first!]);
+            const [first, ...rest] = suffixes;
             suffixes = [];
+            out.push(atLineStart ? first!.trimStart() : first!);
+            for (const s of rest) {
+              trimEnd();
+              out.push(eol + ' '.repeat(ind), s.trimStart());
+            }
+            atLineStart = false;
           } else {
             trimEnd();
             out.push(eol + ' '.repeat(ind));
@@ -181,19 +189,21 @@ function print(doc: Doc, printWidth: number, eol: string): string {
           stack.push([ind + INDENT, mode, d.d]);
           break;
         case 'suffix':
-          // A line has one `//` comment: a second one goes to the next line. (The token it
-          // follows has a line break after it, so this never splits a command.)
-          if (suffixes.length > 0) {
-            stack.push([ind, mode, d]);
-            stack.push([ind, 'break', hardline]);
-          } else suffixes.push(d.s);
+          suffixes.push(d.s);
           break;
         case 'breakParent':
           break;
       }
     }
   }
-  if (suffixes[0] !== undefined) out.push(atLineStart ? suffixes[0].trimStart() : suffixes[0]);
+  // The end of the text: as at a line break, at the indent of the top level.
+  suffixes.forEach((s, i) => {
+    if (i > 0) {
+      trimEnd();
+      out.push(eol);
+    }
+    out.push(i > 0 || atLineStart ? s.trimStart() : s);
+  });
   trimEnd();
   return out.join('');
 }

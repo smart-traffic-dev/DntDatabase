@@ -519,6 +519,21 @@ describe('formatMongo: the console reading', () => {
 
   it('a_second_line_comment_starts_its_own_line', () => {
     expect(fmt('db.c.find({a: [] // c7\n, // c3\nb: 1})')).toBe(lines('db.c.find({', '  a: [], // c7', '  // c3', '  b: 1', '})'));
+    // After the statement: a comment of its own between statements, at their indent.
     expect(fmt('db.c // a\n.find() // b')).toBe(lines('db.c.find() // a', '// b'));
+  });
+
+  it('a_second_line_comment_goes_at_the_indent_of_what_follows_and_stays_there', () => {
+    // It starts the next line, before its first token and at its indent, where the next
+    // pass reads it as that token's comment.
+    for (const [text, want] of [
+      ['db.c.find({a // x\n: [ // y\n1]})', lines('db.c.find({', '  a: [ // x', '    // y', '    1', '  ]', '})')],
+      ['db.c.insertOne({tags // x\n[ // y\n0]})', lines('db.c.insertOne({', '  tags[ // x', '    // y', '    0', '  ]', '})')],
+      ['db.c // a\n.find() // b', lines('db.c.find() // a', '// b')],
+    ] as const) {
+      const once = fmt(text);
+      expect(once, text).toBe(want);
+      expect(fmt(once), text).toBe(once);
+    }
   });
 });
